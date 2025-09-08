@@ -1,38 +1,42 @@
-# Go Image Scraper Server
+# Render 🖼️
 
-This project is a high-performance, standalone image scraping server written in Go. It provides a WebSocket-based API to request images from Pinterest, ensuring that clients receive unique images for each query.
+**A high-performance Go server providing a real-time WebSocket API ⚡ for scraping unique images from Pinterest.**
 
-## Architecture
+Render is designed for developers and automated systems that require a reliable and efficient image-scraping solution. By leveraging a headless browser and an intelligent duplicate-detection system, Render delivers a continuous stream of fresh images while minimizing client-side complexity.
 
-The server is built with a focus on performance and low client-side load. It uses the `lxzan/gws` library for efficient WebSocket communication and `bbolt` for a simple, file-based database to track image uniqueness per client.
+---
 
-The core components are:
-- **Web Server**: A standard `net/http` server that handles WebSocket upgrade requests.
-- **WebSocket Handler**: Manages the client connection, processes scrape requests, and streams back image data.
-- **Authentication**: A middleware that protects the scrape endpoint with a simple servername/password scheme.
-- **Scraper Service**: A headless browser-based scraper (using `chromedp`) that fetches image information from Pinterest.
-- **Uniqueness Service**: A `bbolt`-backed service that tracks the hashes of images sent to each client, preventing duplicate images from being sent.
+## ✨ Key Features
 
-## Getting Started
+- **🧠 Intelligent Uniqueness:** A perceptual hashing algorithm (`dHash`) and a persistent `bbolt` database ensure that each client receives a unique set of images for every query.
+- **⚡ High-Performance & Concurrent:** Built with Go and the `lxzan/gws` WebSocket library, Render is designed for high-concurrency and low-latency.
+- **🛡️ Robust Scraping Engine:** By using a headless browser (`chromedp`), Render accurately simulates a real user, making it resilient to website changes.
+- **🔒 Simple and Secure API:** The server exposes a single WebSocket endpoint, protected by a straightforward, header-based authentication scheme.
+- **⚙️ Configurable:** All key settings, including the server port and client credentials, are managed through a simple `config.json` file.
+
+---
+
+## 🚀 Getting Started
 
 ### Prerequisites
 - Go 1.18 or later
-- A modern web browser supported by `chromedp` (e.g., Google Chrome, Microsoft Edge)
+- A modern web browser supported by `chromedp` (e.g., Google Chrome, Microsoft Edge) for local development.
 
 ### Installation
-1. Clone the repository:
-   ```bash
-   git clone <repository-url>
-   cd gopin
-   ```
-2. Install the dependencies:
-   ```bash
-   go mod tidy
-   ```
+1.  **Clone the repository:**
+    ```bash
+    git clone https://github.com/your-username/render.git
+    cd render
+    ```
+2.  **Install dependencies:**
+    ```bash
+    go mod tidy
+    ```
 
 ### Configuration
-The server is configured via a `config.json` file in the root of the project. A sample configuration is provided below:
+The server is configured via a `config.json` file. Create one in the root of the project:
 
+**`config.json`**
 ```json
 {
   "port": "8080",
@@ -43,9 +47,6 @@ The server is configured via a `config.json` file in the root of the project. A 
 }
 ```
 
-- `port`: The port the server will run on.
-- `credentials`: A map of `servername: password` pairs for API authentication.
-
 ### Running the Server
 To start the server, run:
 ```bash
@@ -53,28 +54,83 @@ go run main.go
 ```
 The server will start on the port specified in your `config.json`.
 
-## API Usage
+---
+
+## 🔌 API Usage
 
 The server exposes a single WebSocket endpoint at `/scrape`.
 
-### Connection
-To connect to the server, establish a WebSocket connection to `ws://<server-address>:<port>/scrape`. You must provide your credentials in the HTTP headers of the upgrade request:
+### 1. Connection
+To connect, establish a WebSocket connection to `ws://<server-address>:<port>/scrape`. You must provide your credentials in the HTTP headers of the upgrade request:
 
 - `X-Server-Name`: Your client's name (e.g., `my-discord-bot`)
 - `X-Password`: Your client's password (e.g., `super-secret-password`)
 
-### Requesting Images
-Once connected, you can send a JSON message to request images:
+**Example (JavaScript):**
+```javascript
+const WebSocket = require('ws');
 
+const options = {
+  headers: {
+    'X-Server-Name': 'my-discord-bot',
+    'X-Password': 'super-secret-password'
+  }
+};
+
+const ws = new WebSocket('ws://localhost:8080/scrape', options);
+
+ws.on('open', function open() {
+  console.log('Connected to Render! 🚀');
+  // Now you can send scrape requests
+});
+
+ws.on('error', function error(err) {
+    console.error('WebSocket error:', err);
+});
+```
+
+### 2. Requesting Images
+Once connected, send a JSON message to request images:
+
+**`request.json`**
 ```json
 {
-  "query": "your search query",
-  "limit": 10
+  "query": "cyberpunk art",
+  "limit": 5
 }
 ```
 
-- `query`: The search term for Pinterest.
-- `limit`: The number of unique images you want to receive.
+**Example (JavaScript):**
+```javascript
+ws.on('open', function open() {
+  const request = {
+    query: 'cyberpunk art',
+    limit: 5
+  };
+  ws.send(JSON.stringify(request));
+});
+```
 
-### Receiving Images
-The server will stream back the requested number of unique images as raw binary data over the WebSocket. Each image is followed by a text message with the pin ID, in the format `pin:<id>`.
+### 3. Receiving Images
+The server will stream back the requested number of unique images. The data will arrive in two forms:
+- **Binary Messages:** The raw image data (`image/jpeg`, `image/png`, etc.).
+- **Text Messages:** The corresponding Pinterest pin ID, in the format `pin:<id>`.
+
+**Example (JavaScript):**
+```javascript
+const fs = require('fs');
+
+ws.on('message', function incoming(data) {
+  if (Buffer.isBuffer(data)) {
+    // It's an image!
+    console.log('Received image data! 🖼️');
+    // You can save it to a file, for example:
+    const fileName = `image_${Date.now()}.jpg`;
+    fs.writeFileSync(fileName, data);
+    console.log(`Saved image as ${fileName}`);
+  } else {
+    // It's a text message (like the pin ID)
+    const message = data.toString();
+    console.log(`Received message: ${message}`);
+  }
+});
