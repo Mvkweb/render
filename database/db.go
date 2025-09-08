@@ -7,8 +7,6 @@ import (
 	"go.etcd.io/bbolt"
 )
 
-var pinBucket = []byte("pins")
-
 // DB is a wrapper around a bbolt database.
 type DB struct {
 	db *bbolt.DB
@@ -20,15 +18,6 @@ func Open(path string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
-
-	err = db.Update(func(tx *bbolt.Tx) error {
-		_, err := tx.CreateBucketIfNotExists(pinBucket)
-		return err
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create bucket: %w", err)
-	}
-
 	return &DB{db: db}, nil
 }
 
@@ -37,24 +26,32 @@ func (d *DB) Close() error {
 	return d.db.Close()
 }
 
-// Exists checks if a key exists in the database.
-func (d *DB) Exists(id string) (bool, error) {
+// HasClientSeenImage checks if a client has already seen an image with the given hash.
+func (d *DB) HasClientSeenImage(clientName string, hash uint64) (bool, error) {
 	var exists bool
+	hashStr := fmt.Sprintf("%d", hash)
 	err := d.db.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(pinBucket)
-		exists = b.Get([]byte(id)) != nil
+		b := tx.Bucket([]byte(clientName))
+		if b == nil {
+			return nil // Bucket doesn't exist, so the image hasn't been seen
+		}
+		exists = b.Get([]byte(hashStr)) != nil
 		return nil
 	})
 	if err != nil {
-		return false, fmt.Errorf("failed to check for key: %w", err)
+		return false, fmt.Errorf("failed to check for hash: %w", err)
 	}
 	return exists, nil
 }
 
-// Add adds a key to the database.
-func (d *DB) Add(id string) error {
+// MarkImageAsSeen marks an image as seen for a specific client.
+func (d *DB) MarkImageAsSeen(clientName string, hash uint64) error {
+	hashStr := fmt.Sprintf("%d", hash)
 	return d.db.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(pinBucket)
-		return b.Put([]byte(id), []byte("1"))
+		b, err := tx.CreateBucketIfNotExists([]byte(clientName))
+		if err != nil {
+			return fmt.Errorf("failed to create bucket: %w", err)
+		}
+		return b.Put([]byte(hashStr), []byte("1"))
 	})
 }

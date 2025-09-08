@@ -1,0 +1,7 @@
+{
+  "port": "8080",
+  "credentials": {
+    "my-discord-bot": "super-secret-password",
+    "another-client": "password123"
+  }
+}
