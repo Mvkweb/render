@@ -1,0 +1,11 @@
+# Database file
+*.db
+
+# Downloaded images
+output/
+car_images/
+f1_images/
+
+# Binaries
+gopin
+gopin.exe
