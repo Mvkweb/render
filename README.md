@@ -8,11 +8,11 @@ Render is designed for developers and automated systems that require a reliable 
 
 ## ✨ Key Features
 
-- **🧠 Intelligent Uniqueness:** A perceptual hashing algorithm (`dHash`) and a persistent `bbolt` database ensure that each client receives a unique set of images for every query.
+- **🧠 Intelligent Caching:** A background worker proactively scrapes images and stores them in an in-memory pool for instant delivery. A perceptual hashing algorithm (`dHash`) and a persistent `bbolt` database ensure that each client receives a unique set of images.
+- **🛡️ Resilient & Reliable:** Features a **circuit breaker** to prevent repeated calls to failing services, **rate limiting** to avoid API bans, and **browser fingerprint randomization** to mimic real users.
 - **⚡ High-Performance & Concurrent:** Built with Go and the `lxzan/gws` WebSocket library, Render is designed for high-concurrency and low-latency.
-- **🛡️ Robust Scraping Engine:** By using a headless browser (`chromedp`), Render accurately simulates a real user, making it resilient to website changes.
-- **🔒 Simple and Secure API:** The server exposes a single WebSocket endpoint, protected by a straightforward, header-based authentication scheme.
-- **⚙️ Configurable:** All key settings, including the server port and client credentials, are managed through a simple `config.json` file.
+- **⚙️ Highly Configurable:** All key settings—from scraping behavior and API credentials to database cleanup—are managed through a simple `config.json` file.
+- **🔄 Dynamic Queries:** A query rotation system automatically cycles through different search terms to ensure a diverse and continuous stream of fresh images.
 
 ---
 
@@ -34,23 +34,51 @@ Render is designed for developers and automated systems that require a reliable 
     ```
 
 ### Configuration
-The server is configured via a `config.json` file. Create one in the root of the project:
+The server is configured via `config.json`. The default file includes sensible settings for scraping, database management, and more.
 
 **`config.json`**
 ```json
 {
   "port": "8080",
   "credentials": {
-    "my-discord-bot": "super-secret-password",
-    "another-client": "password123"
+    "my-discord-bot": "super-secret-password"
+  },
+  "numWorkers": 10,
+  "scraping": {
+    "minDelay": "5s",
+    "maxDelay": "15s",
+    "poolSize": 200,
+    "refreshInterval": "30m",
+    "queries": [
+      "dark aesthetic discord pfp",
+      "anime discord avatar",
+      "gothic profile picture"
+    ],
+    "userAgents": [
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64)...",
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)..."
+    ]
+  },
+  "database": {
+    "cleanupInterval": "24h",
+    "maxAge": "30d"
   }
 }
 ```
 
-### Running the Server
-To start the server, run:
+### Building the Application
+To build the server and client executables, run:
 ```bash
-go run main.go
+go build -o gopin.exe .
+cd render-client
+go build -o ../gopin-client.exe .
+cd ..
+```
+
+### Running the Server
+To start the server, run the executable from the project root:
+```bash
+./gopin.exe
 ```
 The server will start on the port specified in your `config.json`.
 
@@ -134,3 +162,32 @@ ws.on('message', function incoming(data) {
     console.log(`Received message: ${message}`);
   }
 });
+---
+
+## 🧪 Test Client
+
+A simple Go-based test client is provided in the `render-client` directory to demonstrate how to connect to and interact with the Render server.
+
+### Running the Test Client
+Run the client executable from the project root with your desired flags.
+
+- **Request 10 images with the default query:**
+  ```bash
+  ./gopin-client.exe --limit=10
+  ```
+- **Request 5 images with a custom query:**
+  ```bash
+  ./gopin-client.exe --query="neon city" --limit=5
+  ```
+- **Clear your client's history on the server:**
+  ```bash
+  ./gopin-client.exe --clear=true
+  ```
+
+### Client Flags
+- `--query`: The search term for Pinterest.
+- `--limit`: The number of unique images to download (default: 30).
+- `--output`: The directory to save the images to (default: "output").
+- `--server-name`: The client name for authentication (default: "my-discord-bot").
+- `--password`: The password for authentication (default: "super-secret-password").
+- `--clear`: If `true`, clears the client's image history on the server.

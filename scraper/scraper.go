@@ -2,16 +2,20 @@ package scraper
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"gopin/imaging"
 	"gopin/pinterest"
 	"image"
+	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
 	"io"
-	"log"
+	"log/slog"
+	"math/rand"
 	"net/http"
 	"sync"
+	"time"
 
 	_ "golang.org/x/image/webp"
 )
@@ -24,22 +28,29 @@ type ScrapedImage struct {
 }
 
 // Scraper is a service that scrapes images from Pinterest.
-type Scraper struct{}
+type Scraper struct {
+	numWorkers int
+	log        *slog.Logger
+	client     *pinterest.Client
+	httpClient *http.Client
+	userAgents []string
+}
 
 // New creates a new Scraper service.
-func New() *Scraper {
-	return &Scraper{}
+func New(ctx context.Context, numWorkers int, log *slog.Logger, userAgents []string) *Scraper {
+	client := pinterest.NewClient(ctx, log, userAgents)
+	return &Scraper{
+		numWorkers: numWorkers,
+		log:        log,
+		client:     client,
+		httpClient: &http.Client{Timeout: 20 * time.Second},
+		userAgents: userAgents,
+	}
 }
 
 // Scrape starts the scraping process and returns a channel of scraped images.
 func (s *Scraper) Scrape(query string, limit int) (<-chan ScrapedImage, error) {
-	client, err := pinterest.NewClient()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create pinterest client: %w", err)
-	}
-	// The client will be closed by the pinterest package's scrape function.
-
-	results, err := client.Scrape(query, limit)
+	results, err := s.client.Scrape(query, limit)
 	if err != nil {
 		return nil, fmt.Errorf("error scraping pinterest: %w", err)
 	}
@@ -52,22 +63,21 @@ func (s *Scraper) Scrape(query string, limit int) (<-chan ScrapedImage, error) {
 
 	scrapedImageChan := make(chan ScrapedImage)
 	var wg sync.WaitGroup
-	numWorkers := 10 // TODO: Make this configurable
 
-	wg.Add(numWorkers)
-	for i := 0; i < numWorkers; i++ {
+	wg.Add(s.numWorkers)
+	for i := 0; i < s.numWorkers; i++ {
 		go func() {
 			defer wg.Done()
 			for imgResult := range imageChan {
-				imageData, err := downloadImage(imgResult.URL)
+				imageData, err := s.downloadImage(imgResult.URL)
 				if err != nil {
-					log.Printf("Failed to download image %s: %v", imgResult.URL, err)
+					s.log.Warn("Failed to download image", "url", imgResult.URL, "error", err)
 					continue
 				}
 
 				imgDec, _, err := image.Decode(bytes.NewReader(imageData))
 				if err != nil {
-					log.Printf("Failed to decode image %s: %v", imgResult.URL, err)
+					s.log.Warn("Failed to decode image", "url", imgResult.URL, "error", err)
 					continue
 				}
 
@@ -90,8 +100,18 @@ func (s *Scraper) Scrape(query string, limit int) (<-chan ScrapedImage, error) {
 	return scrapedImageChan, nil
 }
 
-func downloadImage(url string) ([]byte, error) {
-	resp, err := http.Get(url)
+func (s *Scraper) downloadImage(url string) ([]byte, error) {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Set a random user agent
+	userAgent := s.userAgents[rand.Intn(len(s.userAgents))]
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Referer", "https://www.pinterest.com/")
+
+	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to download image: %w", err)
 	}

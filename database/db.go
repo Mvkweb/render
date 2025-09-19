@@ -14,7 +14,7 @@ type DB struct {
 
 // Open opens a database file at the given path.
 func Open(path string) (*DB, error) {
-	db, err := bbolt.Open(path, 0600, &bbolt.Options{Timeout: 1 * time.Second})
+	db, err := bbolt.Open(path, 0600, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -47,11 +47,43 @@ func (d *DB) HasClientSeenImage(clientName string, hash uint64) (bool, error) {
 // MarkImageAsSeen marks an image as seen for a specific client.
 func (d *DB) MarkImageAsSeen(clientName string, hash uint64) error {
 	hashStr := fmt.Sprintf("%d", hash)
+	timestamp := time.Now().Format(time.RFC3339)
 	return d.db.Update(func(tx *bbolt.Tx) error {
 		b, err := tx.CreateBucketIfNotExists([]byte(clientName))
 		if err != nil {
-			return fmt.Errorf("failed to create bucket: %w", err)
+			return err
 		}
-		return b.Put([]byte(hashStr), []byte("1"))
+		return b.Put([]byte(hashStr), []byte(timestamp))
+	})
+}
+
+// ClearClientHistory removes all records for a given client.
+func (d *DB) ClearClientHistory(clientName string) error {
+	return d.db.Update(func(tx *bbolt.Tx) error {
+		return tx.DeleteBucket([]byte(clientName))
+	})
+}
+
+// CleanupOldEntries removes entries from the database that are older than the specified maxAge.
+func (d *DB) CleanupOldEntries(maxAge time.Duration) error {
+	return d.db.Update(func(tx *bbolt.Tx) error {
+		return tx.ForEach(func(name []byte, b *bbolt.Bucket) error {
+			// Store timestamps with hashes
+			toDelete := [][]byte{}
+			b.ForEach(func(k, v []byte) error {
+				// Parse timestamp from value
+				if timestamp, err := time.Parse(time.RFC3339, string(v)); err == nil {
+					if time.Since(timestamp) > maxAge {
+						toDelete = append(toDelete, k)
+					}
+				}
+				return nil
+			})
+
+			for _, key := range toDelete {
+				b.Delete(key)
+			}
+			return nil
+		})
 	})
 }

@@ -12,6 +12,7 @@ require (
 	github.com/gobwas/pool v0.2.1 // indirect
 	github.com/gobwas/ws v1.4.0 // indirect
 	github.com/klauspost/compress v1.17.9 // indirect
+	github.com/lmittmann/tint v1.1.2 // indirect
 	github.com/lxzan/gws v1.8.9 // indirect
 	github.com/nfnt/resize v0.0.0-20180221191011-83c6a9932646 // indirect
 	go.etcd.io/bbolt v1.4.3 // indirect
