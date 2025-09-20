@@ -121,104 +121,109 @@ type SearchResult struct {
 	} `json:"resource_response"`
 }
 
-// Scrape scrapes Pinterest for images based on a keyword.
-func (c *Client) Scrape(query string, limit int) ([]ScrapeResult, error) {
-	var results []ScrapeResult
-	err := c.circuitBreaker.Call(func() error {
-		searchURL := fmt.Sprintf("https://www.pinterest.com/search/pins/?q=%s", url.QueryEscape(query))
+var ErrQueryExhausted = fmt.Errorf("query exhausted")
 
-		var seenIDs = make(map[string]bool)
+// Scrape starts a continuous scraping process for a given query.
+func (c *Client) Scrape(ctx context.Context, query string) (<-chan ScrapeResult, error) {
+	resultChan := make(chan ScrapeResult, 100)
 
-		// Channel to receive the response bodies
-		responseChan := make(chan []byte)
-		listenCtx, cancelListener := context.WithCancel(c.ctx)
-		defer cancelListener()
+	go func() {
+		defer close(resultChan)
 
-		// Set up a listener for the network responses
-		chromedp.ListenTarget(listenCtx, func(ev interface{}) {
-			if resp, ok := ev.(*network.EventResponseReceived); ok {
-				if strings.Contains(resp.Response.URL, "BaseSearchResource") {
-					go func(reqID network.RequestID) {
-						body, err := network.GetResponseBody(reqID).Do(cdp.WithExecutor(listenCtx, chromedp.FromContext(listenCtx).Target))
-						if err == nil {
-							select {
-							case responseChan <- body:
-							case <-listenCtx.Done():
-							}
-						}
-					}(resp.RequestID)
-				}
-			}
+		err := c.circuitBreaker.Call(func() error {
+			return c.scrapeWithRetries(ctx, query, resultChan)
 		})
 
-		// Run the browser tasks
-		runErr := chromedp.Run(c.ctx,
-			network.Enable(),
-			chromedp.Navigate(searchURL),
-			chromedp.ActionFunc(func(ctx context.Context) error {
-				c.log.Info("Navigated to search page, starting to scroll...", "url", searchURL)
+		if err != nil && err != ErrQueryExhausted {
+			c.log.Error("Scraping call failed after multiple retries.", "error", err, "query", query)
+		}
+	}()
 
-				var noNewResultsCount int
-				const maxConsecutiveTimeouts = 3
+	return resultChan, nil
+}
 
-				// Scroll down to trigger infinite scroll
-				for len(results) < limit {
+func (c *Client) scrapeWithRetries(ctx context.Context, query string, resultChan chan<- ScrapeResult) error {
+	searchURL := fmt.Sprintf("https://www.pinterest.com/search/pins/?q=%s", url.QueryEscape(query))
+	var seenIDs = make(map[string]bool)
+	responseChan := make(chan []byte)
+
+	listenCtx, cancelListener := context.WithCancel(c.ctx)
+	defer cancelListener()
+
+	chromedp.ListenTarget(listenCtx, func(ev interface{}) {
+		if resp, ok := ev.(*network.EventResponseReceived); ok {
+			if strings.Contains(resp.Response.URL, "BaseSearchResource") {
+				go func(reqID network.RequestID) {
+					body, err := network.GetResponseBody(reqID).Do(cdp.WithExecutor(listenCtx, chromedp.FromContext(listenCtx).Target))
+					if err == nil {
+						select {
+						case responseChan <- body:
+						case <-listenCtx.Done():
+						}
+					}
+				}(resp.RequestID)
+			}
+		}
+	})
+
+	return chromedp.Run(c.ctx,
+		network.Enable(),
+		chromedp.Navigate(searchURL),
+		chromedp.ActionFunc(func(actCtx context.Context) error {
+			c.log.Info("Navigated to search page, starting to scroll...", "url", searchURL)
+			var noNewResultsCount int
+			const maxConsecutiveTimeouts = 5
+
+			for {
+				select {
+				case <-ctx.Done():
+					c.log.Info("Scraping cancelled by parent context.", "query", query)
+					return nil
+				default:
 					c.rateLimiter.wait()
-					// More human-like scrolling
-					err := chromedp.Run(ctx,
-						chromedp.Evaluate(`window.scrollBy(0, Math.random() * 500 + 200);`, nil),
-						chromedp.Sleep(time.Duration(500+rand.Intn(500))*time.Millisecond),
+					err := chromedp.Run(actCtx,
+						chromedp.Evaluate(`window.scrollBy(0, Math.random() * 800 + 200);`, nil),
+						chromedp.Sleep(time.Duration(700+rand.Intn(800))*time.Millisecond),
 						chromedp.Evaluate(`window.scrollTo(0, document.body.scrollHeight);`, nil),
 					)
 					if err != nil {
 						return err
 					}
 
-					c.log.Info("Scrolled", "results", len(results))
-
-					// Wait for responses or a timeout
 					select {
 					case body := <-responseChan:
-						noNewResultsCount = 0 // Reset counter on new data
+						noNewResultsCount = 0
 						var searchResult SearchResult
 						if err := json.Unmarshal(body, &searchResult); err == nil {
-							foundNew := false
+							if len(searchResult.ResourceResponse.Data.Results) == 0 {
+								c.log.Info("Received response with no image results.", "query", query)
+								noNewResultsCount++
+							}
+
 							for _, pin := range searchResult.ResourceResponse.Data.Results {
 								if !seenIDs[pin.ID] && pin.Images.Orig.URL != "" {
-									results = append(results, ScrapeResult{ID: pin.ID, URL: pin.Images.Orig.URL})
 									seenIDs[pin.ID] = true
-									foundNew = true
+									select {
+									case resultChan <- ScrapeResult{ID: pin.ID, URL: pin.Images.Orig.URL}:
+									case <-ctx.Done():
+										return nil
+									}
 								}
 							}
-							if !foundNew {
-								c.log.Info("Received data, but no new unique images.")
-							}
 						}
-					case <-time.After(10 * time.Second): // Shorter, repeated timeout
+					case <-time.After(20 * time.Second): // Increased timeout
 						noNewResultsCount++
 						c.log.Warn("Timeout waiting for new results.", "count", noNewResultsCount)
-						if noNewResultsCount >= maxConsecutiveTimeouts {
-							c.log.Error("Reached max consecutive timeouts, assuming end of page.")
-							return nil // Finished
-						}
+					}
+
+					if noNewResultsCount >= maxConsecutiveTimeouts {
+						c.log.Warn("Reached max consecutive timeouts, assuming query is exhausted.", "query", query)
+						return ErrQueryExhausted
 					}
 				}
-				c.log.Info("Reached image limit", "limit", limit)
-				return nil
-			}),
-		)
-
-		if runErr != nil {
-			return fmt.Errorf("failed during browser automation: %w", runErr)
-		}
-		return nil
-	})
-
-	if err != nil {
-		return nil, fmt.Errorf("scraping call failed: %w", err)
-	}
-
-	return results, nil
+			}
+		}),
+	)
 }
 
 func (c *Client) Close() {

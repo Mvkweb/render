@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 )
 
 const version = "1.0.0"
@@ -30,14 +29,6 @@ func main() {
 	defer cancel()
 
 	s := server.New(cfg, log)
-
-	// Start the background scraper
-	refreshInterval, err := time.ParseDuration(cfg.Scraping.RefreshInterval)
-	if err != nil {
-		log.Error("FATAL: Invalid refresh interval in config.json", "error", err)
-		os.Exit(1)
-	}
-	s.StartBackgroundScraper(refreshInterval)
 
 	go func() {
 		if err := s.Start(); err != nil {

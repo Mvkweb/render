@@ -2,6 +2,7 @@ package scraper
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"gopin/pinterest"
 	"gopin/pkg/imaging"
@@ -51,50 +52,54 @@ func New(numWorkers int, log *logger.Logger, userAgents []string) (*Scraper, err
 	}, nil
 }
 
-// Scrape starts the scraping process and returns a channel of scraped images.
-func (s *Scraper) Scrape(query string, limit int) (<-chan ScrapedImage, error) {
-	results, err := s.client.Scrape(query, limit)
+// Scrape starts a continuous scraping process for a given query.
+func (s *Scraper) Scrape(ctx context.Context, query string) (<-chan ScrapedImage, error) {
+	pinterestImageChan, err := s.client.Scrape(ctx, query)
 	if err != nil {
-		return nil, fmt.Errorf("error scraping pinterest: %w", err)
+		return nil, fmt.Errorf("error starting pinterest scrape: %w", err)
 	}
 
-	imageChan := make(chan pinterest.ScrapeResult, len(results))
-	for _, res := range results {
-		imageChan <- res
-	}
-	close(imageChan)
-
-	scrapedImageChan := make(chan ScrapedImage)
+	scrapedImageChan := make(chan ScrapedImage, s.numWorkers)
 	var wg sync.WaitGroup
 
+	// Start worker pool
 	wg.Add(s.numWorkers)
 	for i := 0; i < s.numWorkers; i++ {
 		go func() {
 			defer wg.Done()
-			for imgResult := range imageChan {
-				imageData, err := s.downloadImage(imgResult.URL)
-				if err != nil {
-					s.log.Warn("Failed to download image", "url", imgResult.URL, "error", err)
-					continue
-				}
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case imgResult, ok := <-pinterestImageChan:
+					if !ok {
+						return // Channel closed
+					}
 
-				imgDec, _, err := image.Decode(bytes.NewReader(imageData))
-				if err != nil {
-					s.log.Warn("Failed to decode image", "url", imgResult.URL, "error", err)
-					continue
-				}
+					imageData, err := s.downloadImage(imgResult.URL)
+					if err != nil {
+						s.log.Warn("Failed to download image", "url", imgResult.URL, "error", err)
+						continue
+					}
 
-				hash := imaging.DHash(imgDec)
-				scrapedImageChan <- ScrapedImage{
-					Data: imageData,
-					Hash: hash,
-					ID:   imgResult.ID,
+					imgDec, _, err := image.Decode(bytes.NewReader(imageData))
+					if err != nil {
+						s.log.Warn("Failed to decode image", "url", imgResult.URL, "error", err)
+						continue
+					}
+
+					hash := imaging.DHash(imgDec)
+					select {
+					case scrapedImageChan <- ScrapedImage{Data: imageData, Hash: hash, ID: imgResult.ID}:
+					case <-ctx.Done():
+						return
+					}
 				}
 			}
 		}()
 	}
 
-	// Close the channel once all workers are done
+	// Goroutine to close the channel once all workers are done
 	go func() {
 		wg.Wait()
 		close(scrapedImageChan)

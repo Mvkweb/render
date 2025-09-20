@@ -7,11 +7,11 @@ import (
 	"fmt"
 	"gopin/config"
 	"gopin/database"
+	"gopin/manager"
 	"gopin/pkg/logger"
 	"gopin/scraper"
 	"net/http"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/lxzan/gws"
@@ -24,18 +24,15 @@ const (
 
 // Server holds the dependencies for the HTTP server.
 type Server struct {
-	router       *http.ServeMux
-	upgrader     *gws.Upgrader
-	config       *config.Config
-	db           *database.DB
-	scraper      *scraper.Scraper
-	httpServer   *http.Server
-	log          *logger.Logger
-	clientLocks  map[string]*sync.Mutex
-	locksMutex   sync.Mutex
-	imagePool    *ImagePool
-	queryManager *scraper.QueryManager
-	ctx          context.Context
+	router        *http.ServeMux
+	upgrader      *gws.Upgrader
+	config        *config.Config
+	db            *database.DB
+	scraper       *scraper.Scraper
+	httpServer    *http.Server
+	log           *logger.Logger
+	scrapeManager *manager.ScrapeManager
+	ctx           context.Context
 }
 
 // New creates a new Server.
@@ -53,18 +50,13 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 	}
 
 	s := &Server{
-		router:      http.NewServeMux(),
-		config:      cfg,
-		db:          db,
-		scraper:     scraperInstance,
-		log:         log,
-		clientLocks: make(map[string]*sync.Mutex),
-		imagePool:   NewImagePool(cfg.Scraping.PoolSize),
-		queryManager: scraper.NewQueryManager(cfg.Scraping.Queries, []string{
-			"aesthetic", "dark", "pastel", "vintage",
-			"grunge", "minimal", "neon", "retro",
-		}),
-		ctx: context.Background(), // Use a separate context for the server
+		router:        http.NewServeMux(),
+		config:        cfg,
+		db:            db,
+		scraper:       scraperInstance,
+		log:           log,
+		scrapeManager: manager.New(scraperInstance, db, log),
+		ctx:           context.Background(), // Use a separate context for the server
 	}
 
 	upgrader := gws.NewUpgrader(s.newWsHandler(), &gws.ServerOption{
@@ -76,8 +68,7 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 
 	s.routes()
 
-	// Perform an initial scrape to populate the pool
-	go s.refreshImagePool()
+	s.startCleanupTicker()
 
 	return s
 }
@@ -163,30 +154,23 @@ func (s *Server) handleScrape() http.HandlerFunc {
 
 // wsHandler implements the gws.Event interface.
 type wsHandler struct {
-	db          *database.DB
-	scraper     *scraper.Scraper
-	log         *logger.Logger
-	locksMutex  *sync.Mutex
-	clientLocks map[string]*sync.Mutex
-	imagePool   *ImagePool
+	db            *database.DB
+	log           *logger.Logger
+	scrapeManager *manager.ScrapeManager
 }
 
 func (s *Server) newWsHandler() *wsHandler {
 	return &wsHandler{
-		db:          s.db,
-		scraper:     s.scraper,
-		log:         s.log,
-		clientLocks: s.clientLocks,
-		locksMutex:  &s.locksMutex,
-		imagePool:   s.imagePool,
+		db:            s.db,
+		log:           s.log,
+		scrapeManager: s.scrapeManager,
 	}
 }
 
 // ScrapeRequest defines the structure for a client's scrape request.
 type ScrapeRequest struct {
-	Query   string `json:"query"`
-	Limit   int    `json:"limit"`
-	Command string `json:"command,omitempty"`
+	Queries []string `json:"queries,omitempty"`
+	Command string   `json:"command,omitempty"`
 }
 
 func (c *wsHandler) OnOpen(socket *gws.Conn) {
@@ -194,7 +178,17 @@ func (c *wsHandler) OnOpen(socket *gws.Conn) {
 }
 
 func (c *wsHandler) OnClose(socket *gws.Conn, err error) {
-	c.log.Info("Socket closed", "remoteAddr", socket.RemoteAddr(), "error", err)
+	clientNameVal, _ := socket.Session().Load("serverName")
+	clientName, _ := clientNameVal.(string)
+
+	baseQueryVal, ok := socket.Session().Load("baseQuery")
+	if ok {
+		baseQuery, _ := baseQueryVal.(string)
+		c.scrapeManager.Unsubscribe(clientName, baseQuery)
+		c.log.Info("Client unsubscribed from query", "client", clientName, "baseQuery", baseQuery)
+	}
+
+	c.log.Info("Socket closed", "remoteAddr", socket.RemoteAddr(), "error", err, "client", clientName)
 }
 
 func (c *wsHandler) OnPing(socket *gws.Conn, payload []byte) {
@@ -213,8 +207,8 @@ func (c *wsHandler) OnMessage(socket *gws.Conn, message *gws.Message) {
 		return
 	}
 
-	serverName, _ := socket.Session().Load("serverName")
-	clientName, _ := serverName.(string)
+	clientNameVal, _ := socket.Session().Load("serverName")
+	clientName, _ := clientNameVal.(string)
 
 	if req.Command == "clear" {
 		if err := c.db.ClearClientHistory(clientName); err != nil {
@@ -225,87 +219,84 @@ func (c *wsHandler) OnMessage(socket *gws.Conn, message *gws.Message) {
 		return
 	}
 
-	// Acquire lock for the client
-	c.locksMutex.Lock()
-	if _, ok := c.clientLocks[clientName]; !ok {
-		c.clientLocks[clientName] = &sync.Mutex{}
+	// Unsubscribe from previous query if there is one
+	if oldBaseQuery, ok := socket.Session().Load("baseQuery"); ok {
+		c.scrapeManager.Unsubscribe(clientName, oldBaseQuery.(string))
 	}
-	mu := c.clientLocks[clientName]
-	c.locksMutex.Unlock()
 
-	if !mu.TryLock() {
-		c.log.Warn("Scrape already in progress for client", "client", clientName)
+	if len(req.Queries) == 0 {
+		c.log.Warn("Received scrape request with no queries", "client", clientName)
 		return
 	}
 
-	// Run the image sending in a goroutine to avoid blocking the read loop
+	socket.Session().Store("baseQuery", req.Queries[0])
+	c.log.Info("Client subscribed to query", "client", clientName, "baseQuery", req.Queries[0])
+
+	imageChan, err := c.scrapeManager.Subscribe(clientName, req.Queries)
+	if err != nil {
+		c.log.Error("Failed to subscribe to scrape manager", "error", err, "client", clientName)
+		return
+	}
+
+	// Start a goroutine to stream images to this client
 	go func() {
-		defer mu.Unlock() // Release lock when done
-
-		c.log.Info("Starting image delivery", "client", clientName, "limit", req.Limit)
-
-		for i := 0; i < req.Limit; i++ {
-			img, err := c.imagePool.GetRandomUnseenImage(c.db, clientName)
+		for img := range imageChan {
+			// Check if the client has already seen this image
+			seen, err := c.db.HasClientSeenImage(clientName, img.Hash)
 			if err != nil {
-				c.log.Warn("Could not get unseen image from pool, waiting for next refresh", "error", err, "client", clientName)
-				socket.WriteMessage(gws.OpcodeText, []byte("no_unseen_images_in_pool"))
-				time.Sleep(5 * time.Second) // Wait before retrying
-				i--                         // Retry the same image index
+				c.log.Error("Error checking if image was seen", "error", err, "client", clientName)
 				continue
+			}
+			if seen {
+				continue // Skip seen images
 			}
 
 			// Send the raw image data
 			if err := socket.WriteMessage(gws.OpcodeBinary, img.Data); err != nil {
-				c.log.Error("Error sending image to client", "error", err)
+				c.log.Error("Error sending image to client", "error", err, "client", clientName)
 				return // Stop if we can't send
 			}
 
 			// Let the client know the pin ID
 			socket.WriteMessage(gws.OpcodeText, []byte(fmt.Sprintf("pin:%s", img.ID)))
 
+			// Mark the image as seen for this client
 			if err := c.db.MarkImageAsSeen(clientName, img.Hash); err != nil {
-				c.log.Error("Error marking image as seen", "error", err)
+				c.log.Error("Error marking image as seen", "error", err, "client", clientName)
 			}
 		}
-
-		c.log.Info("Finished sending images", "client", clientName, "count", req.Limit)
-		// Optionally, send a completion message
-		socket.WriteMessage(gws.OpcodeText, []byte("scrape_complete"))
 	}()
 }
 
-// StartBackgroundScraper starts a ticker to periodically refresh the image pool.
-func (s *Server) StartBackgroundScraper(interval time.Duration) {
-	ticker := time.NewTicker(interval)
+// startCleanupTicker starts a goroutine that periodically cleans up old entries from the database.
+func (s *Server) startCleanupTicker() {
+	cleanupInterval, err := time.ParseDuration(s.config.Database.CleanupInterval)
+	if err != nil {
+		s.log.Error("Invalid database cleanup interval in config.json", "error", err)
+		return
+	}
+
+	maxAge, err := time.ParseDuration(s.config.Database.MaxAge)
+	if err != nil {
+		s.log.Error("Invalid database max age in config.json", "error", err)
+		return
+	}
+
+	ticker := time.NewTicker(cleanupInterval)
 	go func() {
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				s.refreshImagePool()
+				s.log.Info("Running database cleanup...")
+				if err := s.db.CleanupOldEntries(maxAge); err != nil {
+					s.log.Error("Database cleanup failed", "error", err)
+				} else {
+					s.log.Info("Database cleanup finished.")
+				}
 			case <-s.ctx.Done():
 				return
 			}
 		}
 	}()
-}
-
-// refreshImagePool gets a new query and scrapes Pinterest for fresh images.
-func (s *Server) refreshImagePool() {
-	query := s.queryManager.GetNextQuery()
-	s.log.Info("Background scraping", "query", query)
-
-	imageChan, err := s.scraper.Scrape(query, 50) // Get 50 fresh images
-	if err != nil {
-		s.log.Error("Background scrape failed", "error", err)
-		return
-	}
-
-	var images []scraper.ScrapedImage
-	for img := range imageChan {
-		images = append(images, img)
-	}
-
-	s.imagePool.AddImages(images)
-	s.log.Info("Image pool refreshed", "newImageCount", len(images))
 }

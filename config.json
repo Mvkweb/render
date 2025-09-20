@@ -10,11 +10,6 @@
     "maxDelay": "15s",
     "poolSize": 200,
     "refreshInterval": "30m",
-    "queries": [
-      "dark aesthetic discord pfp",
-      "anime discord avatar",
-      "gothic profile picture"
-    ],
     "userAgents": [
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36",
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/536.36"
@@ -22,6 +17,6 @@
   },
   "database": {
     "cleanupInterval": "24h",
-    "maxAge": "30d"
+    "maxAge": "720h"
   }
 }

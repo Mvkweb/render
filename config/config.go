@@ -11,7 +11,6 @@ type ScrapingConfig struct {
 	MaxDelay        string   `json:"maxDelay"`
 	PoolSize        int      `json:"poolSize"`
 	RefreshInterval string   `json:"refreshInterval"`
-	Queries         []string `json:"queries"`
 	UserAgents      []string `json:"userAgents"`
 }
 
