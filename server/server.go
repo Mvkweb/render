@@ -7,9 +7,8 @@ import (
 	"fmt"
 	"gopin/config"
 	"gopin/database"
-	"gopin/manager"
+	"gopin/pkg/logger"
 	"gopin/scraper"
-	"log/slog"
 	"net/http"
 	"os"
 	"sync"
@@ -31,8 +30,7 @@ type Server struct {
 	db           *database.DB
 	scraper      *scraper.Scraper
 	httpServer   *http.Server
-	log          *slog.Logger
-	manager      *manager.Manager
+	log          *logger.Logger
 	clientLocks  map[string]*sync.Mutex
 	locksMutex   sync.Mutex
 	imagePool    *ImagePool
@@ -41,20 +39,18 @@ type Server struct {
 }
 
 // New creates a new Server.
-func New(cfg *config.Config, log *slog.Logger) *Server {
-	db, err := database.Open("gopin.db")
+func New(cfg *config.Config, log *logger.Logger) *Server {
+	db, err := database.Open("data/render.db")
 	if err != nil {
 		log.Error("Failed to open database", "error", err)
 		os.Exit(1)
 	}
 
-	manager, err := manager.New()
+	scraperInstance, err := scraper.New(cfg.NumWorkers, log, cfg.Scraping.UserAgents)
 	if err != nil {
-		log.Error("Failed to create browser manager", "error", err)
+		log.Error("Failed to create scraper", "error", err)
 		os.Exit(1)
 	}
-
-	scraperInstance := scraper.New(manager.Ctx, cfg.NumWorkers, log, cfg.Scraping.UserAgents)
 
 	s := &Server{
 		router:      http.NewServeMux(),
@@ -62,7 +58,6 @@ func New(cfg *config.Config, log *slog.Logger) *Server {
 		db:          db,
 		scraper:     scraperInstance,
 		log:         log,
-		manager:     manager,
 		clientLocks: make(map[string]*sync.Mutex),
 		imagePool:   NewImagePool(cfg.Scraping.PoolSize),
 		queryManager: scraper.NewQueryManager(cfg.Scraping.Queries, []string{
@@ -116,7 +111,7 @@ func (s *Server) Shutdown(ctx context.Context) {
 	}
 
 	// Close the browser manager
-	s.manager.Cancel()
+	s.scraper.Close()
 
 	s.log.Info("Server shut down gracefully.")
 }
@@ -170,7 +165,7 @@ func (s *Server) handleScrape() http.HandlerFunc {
 type wsHandler struct {
 	db          *database.DB
 	scraper     *scraper.Scraper
-	log         *slog.Logger
+	log         *logger.Logger
 	locksMutex  *sync.Mutex
 	clientLocks map[string]*sync.Mutex
 	imagePool   *ImagePool

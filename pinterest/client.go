@@ -4,10 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"gopin/reliability"
-	"log/slog"
+	"gopin/pkg/logger"
+	"gopin/pkg/reliability"
 	"math/rand"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -20,21 +21,55 @@ import (
 // Client is a client for scraping Pinterest using a headless browser.
 type Client struct {
 	ctx            context.Context
-	log            *slog.Logger
+	log            *logger.Logger
 	userAgents     []string
 	rateLimiter    *rateLimiter
 	circuitBreaker *reliability.CircuitBreaker
+	cancel         context.CancelFunc
 }
 
 // NewClient creates a new Pinterest scraper client.
-func NewClient(ctx context.Context, log *slog.Logger, userAgents []string) *Client {
-	return &Client{
+func NewClient(log *logger.Logger, userAgents []string) (*Client, error) {
+	var execPath string
+	for _, path := range []string{
+		`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
+		`C:\Program Files\Microsoft\Edge\Application\msedge.exe`,
+	} {
+		if _, err := os.Stat(path); err == nil {
+			execPath = path
+			break
+		}
+	}
+
+	if execPath == "" {
+		return nil, fmt.Errorf("microsoft edge not found")
+	}
+
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.ExecPath(execPath),
+		chromedp.UserAgent(getRandomUserAgent()),
+		chromedp.WindowSize(1920+rand.Intn(200), 1080+rand.Intn(200)),
+		chromedp.DisableGPU,
+		chromedp.Flag("disable-blink-features", "AutomationControlled"),
+		chromedp.Flag("excludeSwitches", "enable-automation"),
+	)
+
+	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), opts...)
+	ctx, cancelCtx := chromedp.NewContext(allocCtx)
+
+	client := &Client{
 		ctx:            ctx,
 		log:            log,
 		userAgents:     userAgents,
 		rateLimiter:    newRateLimiter(time.Second*5, time.Second*15),
 		circuitBreaker: reliability.NewCircuitBreaker(3, time.Minute),
+		cancel: func() {
+			cancelCtx()
+			cancelAlloc()
+		},
 	}
+
+	return client, nil
 }
 
 // rateLimiter enforces a delay between requests.
@@ -184,4 +219,18 @@ func (c *Client) Scrape(query string, limit int) ([]ScrapeResult, error) {
 	}
 
 	return results, nil
+}
+
+func (c *Client) Close() {
+	c.cancel()
+}
+
+func getRandomUserAgent() string {
+	agents := []string{
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/536.36",
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36",
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36",
+	}
+	return agents[rand.Intn(len(agents))]
 }

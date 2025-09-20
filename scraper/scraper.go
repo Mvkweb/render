@@ -2,16 +2,15 @@ package scraper
 
 import (
 	"bytes"
-	"context"
 	"fmt"
-	"gopin/imaging"
 	"gopin/pinterest"
+	"gopin/pkg/imaging"
+	"gopin/pkg/logger"
 	"image"
 	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
 	"io"
-	"log/slog"
 	"math/rand"
 	"net/http"
 	"sync"
@@ -30,22 +29,26 @@ type ScrapedImage struct {
 // Scraper is a service that scrapes images from Pinterest.
 type Scraper struct {
 	numWorkers int
-	log        *slog.Logger
+	log        *logger.Logger
 	client     *pinterest.Client
 	httpClient *http.Client
 	userAgents []string
 }
 
 // New creates a new Scraper service.
-func New(ctx context.Context, numWorkers int, log *slog.Logger, userAgents []string) *Scraper {
-	client := pinterest.NewClient(ctx, log, userAgents)
+func New(numWorkers int, log *logger.Logger, userAgents []string) (*Scraper, error) {
+	client, err := pinterest.NewClient(log, userAgents)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create pinterest client: %w", err)
+	}
+
 	return &Scraper{
 		numWorkers: numWorkers,
 		log:        log,
 		client:     client,
 		httpClient: &http.Client{Timeout: 20 * time.Second},
 		userAgents: userAgents,
-	}
+	}, nil
 }
 
 // Scrape starts the scraping process and returns a channel of scraped images.
@@ -127,4 +130,9 @@ func (s *Scraper) downloadImage(url string) ([]byte, error) {
 	}
 
 	return imageData, nil
+}
+
+// Close shuts down the scraper's underlying pinterest client.
+func (s *Scraper) Close() {
+	s.client.Close()
 }

@@ -9,3 +9,10 @@ f1_images/
 # Binaries
 gopin
 gopin.exe
+
+# Compiled binaries
+/bin
+*.exe
+
+# Data files
+/data
