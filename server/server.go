@@ -170,6 +170,7 @@ func (s *Server) newWsHandler() *wsHandler {
 // ScrapeRequest defines the structure for a client's scrape request.
 type ScrapeRequest struct {
 	Queries []string `json:"queries,omitempty"`
+	Limit   int      `json:"limit,omitempty"`
 	Command string   `json:"command,omitempty"`
 }
 
@@ -181,12 +182,8 @@ func (c *wsHandler) OnClose(socket *gws.Conn, err error) {
 	clientNameVal, _ := socket.Session().Load("serverName")
 	clientName, _ := clientNameVal.(string)
 
-	baseQueryVal, ok := socket.Session().Load("baseQuery")
-	if ok {
-		baseQuery, _ := baseQueryVal.(string)
-		c.scrapeManager.Unsubscribe(clientName, baseQuery)
-		c.log.Info("Client unsubscribed from query", "client", clientName, "baseQuery", baseQuery)
-	}
+	c.scrapeManager.Stop(clientName)
+	c.log.Info("Client disconnected, stopping scrape pool", "client", clientName)
 
 	c.log.Info("Socket closed", "remoteAddr", socket.RemoteAddr(), "error", err, "client", clientName)
 }
@@ -219,24 +216,13 @@ func (c *wsHandler) OnMessage(socket *gws.Conn, message *gws.Message) {
 		return
 	}
 
-	// Unsubscribe from previous query if there is one
-	if oldBaseQuery, ok := socket.Session().Load("baseQuery"); ok {
-		c.scrapeManager.Unsubscribe(clientName, oldBaseQuery.(string))
-	}
-
 	if len(req.Queries) == 0 {
 		c.log.Warn("Received scrape request with no queries", "client", clientName)
 		return
 	}
 
-	socket.Session().Store("baseQuery", req.Queries[0])
-	c.log.Info("Client subscribed to query", "client", clientName, "baseQuery", req.Queries[0])
-
-	imageChan, err := c.scrapeManager.Subscribe(clientName, req.Queries)
-	if err != nil {
-		c.log.Error("Failed to subscribe to scrape manager", "error", err, "client", clientName)
-		return
-	}
+	c.log.Info("Starting new scrape pool for client", "client", clientName, "queryCount", len(req.Queries), "limit", req.Limit)
+	imageChan := c.scrapeManager.Start(clientName, req.Queries, req.Limit)
 
 	// Start a goroutine to stream images to this client
 	go func() {

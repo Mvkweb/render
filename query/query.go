@@ -1,33 +1,33 @@
 package query
 
 import (
+	"math/rand"
 	"sync"
+	"time"
 )
 
-// QueryManager manages a list of queries.
-type QueryManager struct {
+// Manager manages a list of queries and selects them randomly.
+type Manager struct {
 	queries []string
-	index   int
 	mu      sync.Mutex
 }
 
-// NewQueryManager creates a new QueryManager.
-func NewQueryManager(queries []string) *QueryManager {
-	return &QueryManager{
+// NewManager creates a new query manager.
+func NewManager(queries []string) *Manager {
+	return &Manager{
 		queries: queries,
 	}
 }
 
-// GetNextQuery returns the next query in the list.
-func (qm *QueryManager) GetNextQuery() (string, bool) {
-	qm.mu.Lock()
-	defer qm.mu.Unlock()
+// GetRandom returns a random query from the list.
+func (m *Manager) GetRandom() (string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
-	if qm.index >= len(qm.queries) {
-		return "", false // No more queries
+	if len(m.queries) == 0 {
+		return "", false
 	}
 
-	query := qm.queries[qm.index]
-	qm.index++
-	return query, true
+	rand.Seed(time.Now().UnixNano())
+	return m.queries[rand.Intn(len(m.queries))], true
 }

@@ -24,6 +24,7 @@ const (
 // ScrapeRequest defines the structure for a client's scrape request.
 type ScrapeRequest struct {
 	Queries []string `json:"queries,omitempty"`
+	Limit   int      `json:"limit,omitempty"`
 	Command string   `json:"command,omitempty"`
 }
 
@@ -61,6 +62,7 @@ func (c *wsHandler) OnMessage(socket *gws.Conn, message *gws.Message) {
 
 func main() {
 	queriesFile := flag.String("queries", "queries.json", "Path to the JSON file containing a list of queries.")
+	limit := flag.Int("limit", 255, "The maximum number of images to download.")
 	outputDir := flag.String("output", "output", "The directory to save images to.")
 	clear := flag.Bool("clear", false, "Clear the client's history on the server.")
 	serverName := flag.String("server-name", "my-discord-bot", "The server name for authentication.")
@@ -111,9 +113,12 @@ func main() {
 		}
 
 		// Send the full list of queries to the server
-		req := ScrapeRequest{Queries: queries}
+		req := ScrapeRequest{
+			Queries: queries,
+			Limit:   *limit,
+		}
 		reqBytes, _ := json.Marshal(req)
-		log.Println("Sending query list to server...")
+		log.Println("Sending query list to server...", "limit", *limit)
 		if err := socket.WriteMessage(gws.OpcodeText, reqBytes); err != nil {
 			log.Printf("Failed to send query list: %v", err)
 			return

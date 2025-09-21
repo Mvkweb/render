@@ -38,15 +38,10 @@ type Scraper struct {
 
 // New creates a new Scraper service.
 func New(numWorkers int, log *logger.Logger, userAgents []string) (*Scraper, error) {
-	client, err := pinterest.NewClient(log, userAgents)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create pinterest client: %w", err)
-	}
-
 	return &Scraper{
 		numWorkers: numWorkers,
 		log:        log,
-		client:     client,
+		client:     pinterest.NewClient(log, userAgents),
 		httpClient: &http.Client{Timeout: 20 * time.Second},
 		userAgents: userAgents,
 	}, nil
@@ -137,7 +132,5 @@ func (s *Scraper) downloadImage(url string) ([]byte, error) {
 	return imageData, nil
 }
 
-// Close shuts down the scraper's underlying pinterest client.
-func (s *Scraper) Close() {
-	s.client.Close()
-}
+// Close is no longer needed as each scrape job manages its own browser instance.
+func (s *Scraper) Close() {}
